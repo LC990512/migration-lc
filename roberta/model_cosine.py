@@ -73,6 +73,7 @@ class MultipleChoices_network(BertPreTrainedModel):
         super().__init__(config)
 
         #lc
+        input = 768
         if model_args.choose_model == 'roberta':
             self.model = RobertaModel.from_pretrained(
                 model_args.model_name_or_path,
@@ -87,6 +88,7 @@ class MultipleChoices_network(BertPreTrainedModel):
                 cache_dir = model_args.cache_dir,
                 revision  = model_args.model_revision
             )
+            input = 768*4
         else:
             self.model = BertModel.from_pretrained(
                 model_args.model_name_or_path,
@@ -96,9 +98,8 @@ class MultipleChoices_network(BertPreTrainedModel):
             )
 
         hid = 700
-        input = 768*4
+        #input = 768*4
 
-        # 改roberta
         #BertPreTrainedModel->nn.Module
         self.choose_model = model_args.choose_model
         self.layer1 = nn.Linear(input,hid)   # 782 = 768 + 14,降低维度
@@ -125,6 +126,7 @@ class MultipleChoices_network(BertPreTrainedModel):
                 output_hidden_states = True, # optional for hidden_states
                 output_attentions=True,
             )
+            #使用最后四层
             hidden_states = outputs.hidden_states # get output_hidden_states
             hidden_states_size = 4 # count of the last states 
             hiddes_states_ind = list(range(-hidden_states_size, 0, 1))
