@@ -9,6 +9,7 @@ from transformers import (
     BertPreTrainedModel
 )
 from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
+from transformers import DistilBertConfig, DistilBertModel, DistilBertTokenizer
 
 from transformers.modeling_outputs import MultipleChoiceModelOutput, TokenClassifierOutput
 from config import ModelArguments
@@ -39,15 +40,28 @@ def attention_visualization(attention, input_ids):
     print("len:", len(attention), file = f)
     print("shape:", attention[0].shape, file = f)
     #attention: 12层[i]*batch_size*12[j]*sequence_lengths*sequnce_lengths
+    #[12, 10, 12, 7, 7]
+    m = len(attention[0])
+    n = len(attention)
+    k = len(attention[0][0][0])
+    p = np.empty((m, n, k, k))
+    print("shape_p:", p.shape, file = f)
     for i in range(0, len(attention)):
-        result = attention[i][0][0]
-        for j in range(1, 12):
-            result = result + attention[i][0][j]
-        result = result / 12
-        #result = result.detch().numpy()
-        
-        name = 'save_attention' + str(i)
-        #np.save(name, result)
+        for j in range(0, len(attention[i])):
+            result = attention[i][j][0]
+            for k in range(1, 12):
+                result = result + attention[i][j][k]
+                #print(i, j, k, attention[i][j][k], file = f)
+            result = result / 12
+            p[j][i] = result.cpu().numpy()
+    # for k in range(0, 12):
+    #     print(k, attention[0][0][k], file = f)
+    
+    # print(p[0][0], file = f)
+    
+            
+    name = 'save_attention_2'
+    np.save(name, p)
     f.close()
 
 class MultipleChoices_network(BertPreTrainedModel):
@@ -66,6 +80,13 @@ class MultipleChoices_network(BertPreTrainedModel):
                 cache_dir = model_args.cache_dir,
                 revision  = model_args.model_revision
             )
+        elif model_args.choose_model == 'distilbert':
+            self.model = DistilBertModel.from_pretrained(
+                model_args.model_name_or_path,
+                config = config,
+                cache_dir = model_args.cache_dir,
+                revision  = model_args.model_revision
+            )
         else:
             self.model = BertModel.from_pretrained(
                 model_args.model_name_or_path,
@@ -75,13 +96,11 @@ class MultipleChoices_network(BertPreTrainedModel):
             )
 
         hid = 700
-        input = 768
+        input = 768*4
 
-        
         # 改roberta
         #BertPreTrainedModel->nn.Module
-        #lc:
-        
+        self.choose_model = model_args.choose_model
         self.layer1 = nn.Linear(input,hid)   # 782 = 768 + 14,降低维度
         self.layer2 = nn.Linear(hid,hid)
     
@@ -97,41 +116,54 @@ class MultipleChoices_network(BertPreTrainedModel):
     ):
 
         #lc
-        outputs = self.model(
+        
+        if self.choose_model == 'distilbert':
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,  # 这里如果是 True, 那么返回的是 dict 而非一个 tuple
+                output_hidden_states = True, # optional for hidden_states
+                output_attentions=True,
+            )
+            hidden_states = outputs.hidden_states # get output_hidden_states
+            hidden_states_size = 4 # count of the last states 
+            hiddes_states_ind = list(range(-hidden_states_size, 0, 1))
+            selected_hiddes_states = torch.cat(tuple([hidden_states[i] for i in hiddes_states_ind]), dim = 2)
+            selected_hiddes_states = selected_hiddes_states[:,0,:]
+            #print("hidden_states:", selected_hiddes_states.shape)
+            selected_hiddes_states = selected_hiddes_states.view(-1,2, selected_hiddes_states.shape[1])
+            selected_hiddes_states_first = selected_hiddes_states[:,0,:]
+            selected_hiddes_states_second = selected_hiddes_states[:,1,:]
+            #print("selected_hiddes_states_first:", selected_hiddes_states_first.shape, selected_hiddes_states_first)
+            #print("selected_hiddes_states_second:", selected_hiddes_states_second.shape, selected_hiddes_states_second)
+            features_first = selected_hiddes_states_first
+            features_second = selected_hiddes_states_second
+        else:
+            outputs = self.model(
                 input_ids=input_ids,
                 token_type_ids=token_type_ids,
                 attention_mask=attention_mask,
                 return_dict=True,  # 这里如果是 True, 那么返回的是 dict 而非一个 tuple
                 output_hidden_states = True, # optional for hidden_states
                 output_attentions=True,
-        )
-
-        pooler_outs = outputs.pooler_output #[400,768] pair紧靠在一起
-
+            )
+            #attention_visualization(outputs.attentions, input_ids)
         
-        # outputs.attentions 得到attentions
-        # 12个元素代表一层；每一层是一个12*batch_size*sequence_lengths*sequnce_lengths
-        # attention 矩阵按照第一维度取平均。batch_size 取0表示第一个句子
-        # tokenizer 分词的时候用input_id 反向解码 （input_ids)
-        # input_ids tokenizer.decode -- import huggface
+            pooler_outs = outputs.pooler_output #[400,768] pair紧靠在一起
+            pooler_shape = pooler_outs.shape
+            #print("pooler_shape:", pooler_shape)
+            if pooler_shape[0]==43:
+                print("here")
+            pooler_outs = pooler_outs.view(-1,2,pooler_shape[1])
+            pooler_first = pooler_outs[:,0,:]
+            pooler_second = pooler_outs[:,1,:]
 
-        attention_visualization(outputs.attentions, input_ids)
-
+            #print("pooler_first:", pooler_first.shape, pooler_first)
+            #print("pooler_second:", pooler_second.shape, pooler_second)
         
-        pooler_shape = pooler_outs.shape
-        if pooler_shape[0]==43:
-            print("here")
-        pooler_outs = pooler_outs.view(-1,2,pooler_shape[1])
-        pooler_first = pooler_outs[:,0,:]
-        pooler_second = pooler_outs[:,1,:]
-
-
-        features_first = pooler_first
-        features_second = pooler_second
-
-        
-
-        
+            features_first = pooler_first
+            features_second = pooler_second
+   
 
         x1 = torch.relu(self.layer1(features_first.float()))
         x2 = torch.relu(self.layer1(features_second.float()))
@@ -149,7 +181,7 @@ class MultipleChoices_network(BertPreTrainedModel):
         
 
         loss = torch.mean((logits - labels) ** 2) if labels is not None else None
-         # 直接用官方提供的返回类进行包装
+        # 直接用官方提供的返回类进行包装
         # return MultipleChoiceModelOutput(
         #     loss=loss,
         #     logits=logits,
@@ -242,6 +274,20 @@ def init_model(logger,model_args:ModelArguments):
                 num_hidden_layers=config_json["num_hidden_layers"],
                 type_vocab_size=config_json["type_vocab_size"],
                 vocab_size=config_json["vocab_size"])
+        model = MultipleChoices_network(model_args,config)
+        return model, tokenizer
+    elif model_args.choose_model == 'distilbert':
+        tokenizer = DistilBertTokenizer.from_pretrained(
+            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+            cache_dir=model_args.load_plm_path,
+            use_fast=model_args.use_fast_tokenizer,
+            revision=model_args.model_revision)
+        #config_json = load_config(model_args.load_cfg_path, logger)
+        config = DistilBertConfig.from_pretrained(
+            model_args.config_name if model_args.config_name else model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision
+        )
         model = MultipleChoices_network(model_args,config)
         return model, tokenizer
     else:
