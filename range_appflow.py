@@ -5,19 +5,20 @@ import math
 import re
 import ast
 import os
-import time
 from lxml import etree
+import time
+from functools import cmp_to_key
 
 start_time = time.time()
 
+#寻找statename时，打不开文件直接return了，错误
 num = 0
 pro_cnt = 0
 data = pd.DataFrame()
 problem = set()
 
-#tgtindex=20列
-#state_name=21列
-def search_xml(node, search_type, id, re_xpath):
+#按相对位置定位
+def search_rel(node, search_type, id, re_xpath):
     if search_type == 'id':
         if node.get('resource-id') == id:
             return(node.get('bounds'))
@@ -26,53 +27,98 @@ def search_xml(node, search_type, id, re_xpath):
             return(node.get('bounds'))
     if len(node) > 0:
         for child in node:
-            bounds = search_xml(child, search_type, id, re_xpath)
+            bounds = search_rel(child, search_type, id, re_xpath)
             if bounds: return bounds
     return None
 
-def get_location(app, id, xpath):
+#按绝对位置定位
+def search_abs(root, xpath):
+    bounds = ''
+    find_all_node = etree.XPath(xpath)
+    nodelist = find_all_node(root)
+    if len(nodelist) != 0:
+        if len(nodelist) > 1:
+            print("more than one node has the same xpath in one .uix")
+            print("state_path", xpath)
+        if nodelist[0].get("bounds") != "":
+            bounds = nodelist[0].get("bounds")
+    return bounds
+
+#改写xpath
+def revise_xpath(ori_xpath):
+    # absolute path
+    element_list = ori_xpath.split("/")
+    revised_xpath = '/hierarchy'
+    for index in range(2,len(element_list)):
+        element = element_list[index]
+        if "[" in element:
+            xpath_element = "/node[@class='"+element.split("[")[0]+"']"+"["+element.split("[")[1]
+        else:
+            xpath_element = "/node[@class='"+element+"']"
+        revised_xpath = revised_xpath + xpath_element
+    return revised_xpath
+
+def get_location(index, app, id, xpath):
+    #sta = etsy/sign_in_or_sign_up.uix
     sta = ''
     bounds = ''
     re_xpath = {'class':"", 'cd':""}    
     xpath_type = ''
     search_type = ''
     cnt = 0
-    
+        
     if (str(id) == 'nan') and (str(xpath) == 'nan'):
         return sta, bounds, cnt
     
-    #先从revise.csv中找sta
-    df_tar = pd.read_csv('GT_revise/'+app[:2]+'/'+app+'_revise.csv')
+    #先从GT_etsy_revise.csv中找sta
+    df_tar_path = 'GT_revise/'+'GT_' + app + '_revise.csv'
+    df_tar = pd.read_csv('GT_revise/'+'GT_' + app + '_revise.csv')
     sta_list = []
-    if (str(xpath) != 'nan'):
-        pattern = re.compile(r'\/\/(.*?)\[')
-        if (pattern.findall(xpath)):
-            re_xpath['class'] = pattern.findall(xpath)[0]
-        pattern = re.compile(r'\"(.*?)\"')
-        if (pattern.findall(xpath)):
-            re_xpath['cd'] = pattern.findall(xpath)[0]
+    
     
     for i in df_tar.index:
         #ori_id // ori_appium_xpath
+        sta = ''
         if id == df_tar.loc[i]['ori_id']:
             if (xpath == 'nan'):
                 search_type = 'id'
                 sta = df_tar.loc[i]['state_name']
-                sta_list.append(df_tar.loc[i]['state_name'])
             if  (xpath == df_tar.loc[i]['ori_appium_xpath']):
                 search_type = 'both'
-                sta = df_tar.loc[i]['state_name']
-                sta_list.append(df_tar.loc[i]['state_name'])
+                sta = df_tar.loc[i]['state_name']  
         elif id == 'nan':
             if xpath == df_tar.loc[i]['ori_appium_xpath']:
                 search_type = 'xpath'
-                sta = df_tar.loc[i]['state_name']
-                sta_list.append(df_tar.loc[i]['state_name'])
+                sta = df_tar.loc[i]['state_name']   
+        if sta:
+            if str(sta) != 'nan':
+                sta = sta.replace(' ', '\t')
+                p = sta.split('\t')
+                for item in p:
+                    sta_list.append(item)
+
+
+    #改写xpath
+    if '/hierarchy' in xpath:
+        xpath = revise_xpath(xpath)
+        xpath_type = 'absolute'
+    else:
+        if (str(xpath) != 'nan'):
+            pattern = re.compile(r'\/\/(.*?)\[')
+            if (pattern.findall(xpath)):
+                re_xpath['class'] = pattern.findall(xpath)[0]
+            pattern = re.compile(r'\"(.*?)\"')
+            if (pattern.findall(xpath)):
+                re_xpath['cd'] = pattern.findall(xpath)[0]
+        xpath_type = 'relative'
 
     
     #遍历不同的xml处理无sta的情况
-    mydir = 'screenshots/'+app[:2]+'/'+app
-    if not sta:
+    flag = 0
+    if app == 'fivemiles':
+        app = '5miles'
+    mydir = 'screenshots/'+app
+    if len(sta_list) == 0:
         if (str(xpath) == 'nan'):
             search_type = 'id'
         elif (str(id) == 'nan'):
@@ -82,46 +128,80 @@ def get_location(app, id, xpath):
         
         for root, dirs, files in os.walk(mydir):
             for file in files:
-                if not file.endswith(".xml"):
-                    continue
-                targetFilePath = app+'/'+ file
-                sta_list.append(targetFilePath)
-   
-    
+                if file.endswith(".xml") or file.endswith(".uix"):
+                    targetFilePath = app+'/'+ file
+                    sta_list.append(targetFilePath)
+                    flag = 1
+
+
     #无文件
     map = []
     map_bounds = []
     for path_item in sta_list:
+        flag_abs = 0
         try:
-            tree = etree.parse('screenshots/'+app[:2]+'/'+app+'/'+path_item[4:])
+            tree = etree.parse('screenshots/'+path_item)
         except:
             i = sta_list.index(path_item)
             continue
             #return sta, bounds, cnt
         root = tree.getroot()
+        
+        #先按相对位置找
         for node in root:
             if search_type == 'both':
-                bounds_item = search_xml(node, 'id', id, re_xpath)
+                bounds_item = search_rel(node, 'id', id, re_xpath)
                 if not bounds_item:
-                    bounds_item = search_xml(node, 'xpath', id, re_xpath)
+                    bounds_item = search_rel(node, 'xpath', id, re_xpath)
             else:
-                bounds_item = search_xml(node, search_type, id, re_xpath)
+                bounds_item = search_rel(node, search_type, id, re_xpath)
             if bounds_item:
-                bounds = bounds_item
-                sta = path_item
+                flag_abs = 1
+                
                 map.append(path_item)
                 map_bounds.append(bounds_item)
                 cnt = cnt + 1
-    
-    if not bounds:    
+        
+      
+        #没找到再按绝对位置找
+        if not flag_abs:
+            if (xpath_type == 'absolute') and (search_type != 'id'):
+                bounds_item = search_abs(root, xpath)
+                if bounds_item:
+                    sta = path_item
+                    map.append(path_item)
+                    map_bounds.append(bounds_item)
+                    cnt = cnt + 1
+
+  
+    if len(map) == 0:
         return sta, bounds, cnt
     
-    
-    if cnt > 1:
-        sta = str(map)
-        bounds = str(map_bounds)
-    return sta, bounds, cnt
+    #uix xml去重 5miles/sign_in.uix
+    map_choose = []
+    map_bounds_choose = []
+    for i in range(0, len(map)):
+        p = map[i].split('.')[0]
+        if p not in map_choose:
+            map_choose.append(p)
+            map_bounds_choose.append(map_bounds[i])
+        else:
+            #存在uix和xml位置不一样的情况
+            index_bounds = map_choose.index(p)
+            if (map_bounds_choose[index_bounds] != map_bounds[i]):
+                map_choose.append(p)
+                map_bounds_choose.append(map_bounds[i])
+               
+    if len(map_choose) > 1:
+        sta = str(map_choose)
+        bounds = str(map_bounds_choose)
+    else:
+        sta = map_choose[0]
+        bounds = map_bounds_choose[0]
 
+ 
+    return sta, bounds, len(map_choose)
+    
 
 #是否在同一界面
 def get_screen_bool(i, j, x):
@@ -141,9 +221,9 @@ def lcs(y):
     y.sort_values(by="src_index", inplace=True, ascending=True) 
     
     for i in y.index:
-        if ((y.loc[i]['ori_predict_label'] == 1) and (y.loc[i]['label'] == 1)) or (str(y.loc[i]['type']) == 'SYS_EVENT'):
+        if ((y.loc[i]['ori_predict_label'] == 1) and (y.loc[i]['label'] == 1)) or (str(y.loc[i]['evaluate_ori']) == 'tn'):
             flag_exist = 0
-            if y.loc[i]['src_index'] == first_src_index:
+            if (y.loc[i]['src_index'] == first_src_index):
                 flag = 1
                 for key, value in dict.items():
                     if get_same_bool(y.loc[i]['index'], value, y):
@@ -172,14 +252,6 @@ def lcs(y):
     y['order'] = str(order)
     return y
 
-#是否为空组件
-def get_empty_bool(i, x):
-    #Tgt_add_id and tgt_add_xpath and tgt_text and tgt_content 都为空的时候不给tgt_index 
-    if (str(x.loc[x['index']==i, 'tgt_add_id'].values[0]) == 'nan') and (str(x.loc[x['index']==i, 'tgt_add_xpath'].values[0]) == 'nan') and (str(x.loc[x['index']==i, 'tgt_text'].values[0]) == 'nan') and (str(x.loc[x['index']==i, 'tgt_content'].values[0]) == 'nan'):
-        return True
-    return False
-
-#pos是否每个界面内都一致
 def get_same_pos(i, j, x):
     sta_dict_i = []
     bounds_dict_i = []
@@ -246,69 +318,129 @@ def get_same_pos(i, j, x):
             return False
     return True
 
-#是否为同一组件
+
 def get_same_bool(i, j, x):
     #predict_input canonical
     special = 'clear_and_send_keys_and_hide_keyboard'
-    stri = str(x.loc[x['index']==i, 'tgt_text'].values[0])
-    strj = str(x.loc[x['index']==j, 'tgt_text'].values[0])
-                
     if (str(x.loc[x['index']==i, 'tgt_text'].values[0]) != str(x.loc[x['index']==j, 'tgt_text'].values[0])):
-        flag = 0
-        if str(x.loc[x['index']==i, 'tgt_text'].values[0]) == '0' and str(x.loc[x['index']==j, 'tgt_text'].values[0]) == '65.09':
-            flag = 1
-        if str(x.loc[x['index']==i, 'tgt_text'].values[0]) == '65.09' and str(x.loc[x['index']==j, 'tgt_text'].values[0]) == '0':
-            flag = 1
-        if str(x.loc[x['index']==i, 'tgt_text'].values[0]).startswith("https"):
-            stri = stri[0:stri.rfind('com')]
-            strj = strj[0:strj.rfind('com')]      
-            if (stri == strj):
-                flag = 1
-        if (flag == 0):
-            return False
-          
-
+        return False
     if (str(x.loc[x['index']==i, 'tgt_content'].values[0]) != str(x.loc[x['index']==j, 'tgt_content'].values[0])):
         return False
     if (str(x.loc[x['index']==i, 'predict_action'].values[0]) != str(x.loc[x['index']==j, 'predict_action'].values[0])):
         if (str(x.loc[x['index']==i, 'predict_action'].values[0]) != special) and (str(x.loc[x['index']==j, 'predict_action'].values[0]) != special):
-            return False   
+            return False
     if not get_same_pos(i, j, x):
         return False
     if  str(x.loc[x['index']==i, 'tgt_index'].values[0]) == 'nan' and str(x.loc[x['index']==i, 'tgt_content'].values[0]) == 'nan' and str(x.loc[x['index']==i, 'predict_action'].values[0]) == 'nan':
         return False
     return True
 
-def set_order(x, flag):
-    if flag == 1:
-        for i in x.index:
-            if (not x.loc[i]['state_name']):
-                continue
-            name = x.loc[i]['state_name'].split('/')[1]
-            
-            if name == 'start.xml':
-                x.loc[i, 'state_order'] = 1
-            elif name == 'signup.xml':
-                x.loc[i, 'state_order'] = 2
-            elif name == 'signin.xml':
-                x.loc[i, 'state_order'] = 3
-            else:
-                x.loc[i, 'state_order'] = 4
-    else:
-        for i in x.index:
-            if (not x.loc[i]['state_name']):
-                continue
-            name = x.loc[i]['state_name'].split('/')[1]
+def get_empty_bool(i, x):
+    #Tgt_add_id and tgt_add_xpath and tgt_text and tgt_content 都为空的时候不给tgt_index 
+    if (str(x.loc[x['index']==i, 'tgt_add_id'].values[0]) == 'nan') and (str(x.loc[x['index']==i, 'tgt_add_xpath'].values[0]) == 'nan') and (str(x.loc[x['index']==i, 'tgt_text'].values[0]) == 'nan') and (str(x.loc[x['index']==i, 'tgt_content'].values[0]) == 'nan'):
+        return True
+    return False
 
-            if name == 'start.xml':
-                x.loc[i, 'state_order'] = 1
-            elif name == 'signin.xml':
-                x.loc[i, 'state_order'] = 2
-            elif name == 'signup.xml':
-                x.loc[i, 'state_order'] = 3
-            else:
-                x.loc[i, 'state_order'] = 4
-    return x
+#type = 1 single
+#type = 2 muti
+def single_state_fill(x, dict, dict_max, type):
+    for i in range(len(x)-1, -1, -1):
+        #填过的 / 找不到sta / 没有order / fn / empty的跳过
+        if str(x.iloc[i]['tgt_index']) != 'nan':
+            continue
+        if (not x.iloc[i]['state_name']) or (x.iloc[i]['state_order'] == sys.maxsize):
+            continue     
+        if (str(x.iloc[i]['evaluate_ori']) == 'fn') or get_empty_bool(x.iloc[i]['index'], x):
+            continue
+
+        
+        if (type == 1):
+            if x.iloc[i]['cnt'] > 1:
+                continue
+
+        #判断是否已有该组件
+        flag = 0
+        for key, value in dict.items():
+            if get_same_bool(x.iloc[i]['index'], value, x):
+                x.iloc[i, 22] = key
+                flag = 1
+        if (flag == 1):
+            continue
+
+        #寻找左右区间，第一个有值且在同一界面内的
+        l = i  
+        r = i
+        while ((str(x.iloc[l]['tgt_index']) == 'nan')):
+            if (l - 1 < 0):
+                break
+            l = l - 1
+        while ((str(x.iloc[r]['tgt_index']) == 'nan')):
+            if (r + 1 == len(x)):
+                break
+            r = r + 1
+        
+        if (str(x.iloc[l]['tgt_index']) == 'nan'):
+            #只有右侧
+            if (str(x.iloc[r]['tgt_index']) != 'nan'):
+                index = x.iloc[r]['tgt_index'] - 1
+                while ((index in dict.keys()) or ((index > -3) and (index < 0))):
+                    #如果是同一组件
+                    if index in dict.keys():
+                        if get_same_bool(x.iloc[i]['index'], dict[index], x):
+                            break
+                    index = index - 1
+                x.iloc[i, 22] = index
+                dict[index] = x.iloc[i]['index']    
+        else:
+            if get_screen_bool(i, l, x) or not get_screen_bool(i, l, x):
+                #左右都有
+                if ((str(x.iloc[r]['tgt_index']) != 'nan')):
+                    #左右相等
+                    if get_same_bool(x.iloc[l]['index'], x.iloc[r]['index'], x):
+                        index = x.iloc[r]['tgt_index'] - 0.1
+                        while ((index in dict.keys()) or ((index > -3) and (index < 0))):
+                            index = index - 0.1
+                    else:    
+                        index = (x.iloc[l]['tgt_index'] + x.iloc[r]['tgt_index']) / 2   
+                        while (index in dict.keys()):
+                            index = (x.iloc[l]['tgt_index'] + index) / 2
+                    x.iloc[i, 22] = index
+                    dict[index] = x.iloc[i]['index']    
+                #只有左侧
+                else:
+                    index = x.iloc[l]['tgt_index'] + 1
+                    while ((index in dict.keys()) or ((index > dict_max) and (index < 20))):
+                        if index in dict.keys():
+                            if get_same_bool(x.iloc[i]['index'], dict[index], x):
+                                break
+                        index = index + 1
+                    x.iloc[i, 22] = index
+                    dict[index] = x.iloc[i]['index']
+    return x, dict
+
+def no_state_or_order_fill(x, dict):
+    for i in range(0, len(x)):
+        if str(x.iloc[i]['tgt_index']) != 'nan':
+            continue
+        if ((str(x.iloc[i]['type']) == 'EMPTY_EVENT') or (str(x.iloc[i]['type']) == 'SYS_EVENT')) :
+            continue
+        if (str(x.iloc[i]['evaluate_ori']) == 'fn') or get_empty_bool(x.iloc[i]['index'], x):
+            continue
+            
+        if (not x.iloc[i]['state_name'] or x.iloc[i]['state_order'] == sys.maxsize):
+            flag = 0
+            for key, value in dict.items():
+                if get_same_bool(x.iloc[i]['index'], value, x):
+                    x.iloc[i, 22] = key
+                    flag = 1
+            if (flag == 1):
+                continue
+            # y = x[x['src_app'] == x.iloc[i]['src_app']]
+            # y.sort_values(by=['index'], inplace=True, ascending=True) 
+            index =  max(max(dict) + 1, 20)
+            x.iloc[i, 22] = index
+            dict[index] = x.iloc[i]['index']      
+    return x, dict                        
 
 def assign_state_order_improved(x):
     tgt_app = ''
@@ -316,7 +448,9 @@ def assign_state_order_improved(x):
     
     result_x = x.copy()
     for i in x.index:
-        if ((str(x.loc[i]['type']) == 'EMPTY_EVENT') or (str(x.loc[i]['type']) == 'SYS_EVENT')) :
+        if (str(x.loc[i]['tgt_index']) != 'nan') or (get_empty_bool(x.loc[i]['index'], x)):
+            continue
+        if str(x.loc[i]['evaluate_ori']) == 'fn':
             continue
         if (x.loc[i]['state_name']) and (x.loc[i]['state_order'] == sys.maxsize):
             state = x.loc[i]['state_name']
@@ -326,7 +460,7 @@ def assign_state_order_improved(x):
             for app in relevant_rows:
                 # 获取当前 src_app 中的所有状态及其顺序
                 app_states = x[x['src_app'] == app]#.sort_values(by='state_order', na_position='last')
-                app_states = app_states[~app_states.apply(lambda y: str(y['type']) == 'EMPTY_EVENT' or str(y['type']) == 'SYS_EVENT', axis=1)]
+                app_states = app_states[~app_states.apply(lambda y: get_empty_bool(y['index'], x) or str(y['evaluate_ori']) == 'fn', axis=1)]
 
                  
                 if state not in app_states['state_name'].values:
@@ -337,19 +471,13 @@ def assign_state_order_improved(x):
                 prev_state_order = app_states.loc[:state_index, 'state_order'].replace(sys.maxsize, np.nan).dropna().max()
                 next_state_order = app_states.loc[state_index:, 'state_order'].replace(sys.maxsize, np.nan).dropna().min()
 
-                 
                 # 确定范围
                 if pd.isna(prev_state_order) and pd.isna(next_state_order):
                     continue
                 elif pd.isna(prev_state_order):
-                    order_ranges.append((min(next_state_order-2, 0), next_state_order))
+                    order_ranges.append((min(next_state_order-1, 0), next_state_order))
                 elif pd.isna(next_state_order):
-                    num_state_order_next = len(x[x['state_order'] == prev_state_order+1])
-                    num_state_order_now = len(x[x['state_name'] == state])
-                    if num_state_order_now > num_state_order_next:
-                        order_ranges.append((prev_state_order, app_states['state_order'].replace(sys.maxsize, np.nan).dropna().max() + 1))
-                    else:
-                        order_ranges.append((prev_state_order+1, app_states['state_order'].replace(sys.maxsize, np.nan).dropna().max() + 1.5))
+                    order_ranges.append((prev_state_order, app_states['state_order'].replace(sys.maxsize, np.nan).dropna().max() + 1))
                 else:
                     order_ranges.append((prev_state_order, next_state_order))
             
@@ -375,132 +503,116 @@ def assign_state_order_improved(x):
             
     return result_x
 
-def fill_pos(x, dict, dict_max):
+def set_order(x):
+    #(not testSignUp): main/sign_in_or_sign_up/start-> sign_in-> other-> sign_up 
+    #(testSignUp):     main/sign_in_or_sign_up/start-> sign_up-> sign_in-> other
+
+    if x.iloc[0]['function'] != 'testSignUp':
+        for i in x.index:
+            if (not x.loc[i]['state_name']):
+                continue
+            name = x.loc[i]['state_name'].split('/')[1]
+
+            if name == 'main' or name == 'sign_in_or_sign_up' or name == 'start':
+                x.loc[i, 'state_order'] = 1
+            elif name == 'sign_in':
+                x.loc[i, 'state_order'] = 2
+            elif name == 'sign_up':
+                x.loc[i, 'state_order'] = 4
+            else:
+                x.loc[i, 'state_order'] = 3
+    else:
+        for i in x.index:
+            if (not x.loc[i]['state_name']):
+                continue
+            name = x.loc[i]['state_name'].split('/')[1]
+            if name == 'main' or name == 'sign_in_or_sign_up' or name == 'start':
+                x.loc[i, 'state_order'] = 1
+            elif name == 'sign_up':
+                x.loc[i, 'state_order'] = 2
+            elif name == 'sign_in':
+                x.loc[i, 'state_order'] = 3
+            else:
+                x.loc[i, 'state_order'] = 4
+    return x                
+
+def fill_pos(x, dict):
+    tgt_app = 'wish'
+    function = 'testSignUp'
     pmin = 100
     pmax = -100
-    tgt_app = ''
-    function = ''
-
     cnt_no_state_order = 0
+    
+    #只有一个src_app 按照现有顺序直接赋值
+    if len(x.groupby(['src_app'], group_keys=True).groups) == 1:
+        for i in x.index:
+            if str(x.loc[i]['tgt_index']) != 'nan':
+                continue
+            if get_empty_bool(x.loc[i]['index'], x):
+                continue   
+            if str(x.loc[i]['evaluate_ori']) == 'fn':
+                continue
+            if str(x.loc[i]['ori_tgt_index']) != 'nan':
+                x.loc[i, 'tgt_index'] = x.loc[i]['ori_tgt_index']
+                dict[x.loc[i]['ori_tgt_index']] = x.loc[i]['index']    
+        return x
+
+
+    #如果不存在最长可执行子序列                
+    if len(dict) == 0:
+        flag_tgt_index = 0
+        for i in x.index:
+            if str(x.loc[i, 'tgt_index']) != 'nan':
+                flag_tgt_index = 1
+                break
+        if flag_tgt_index == 0:
+            for i in x.index:
+                if str(x.loc[i]['ori_tgt_index']) != 'nan':
+                    x.loc[i, 'tgt_index'] = x.loc[i]['ori_tgt_index']
+                    x.loc[i, 'state_order'] = 1
+                    value = x.loc[i]['state_name']
+                    first_value = x.loc[i]['index']  
+                    dict[x.loc[i]['ori_tgt_index']] = x.loc[i]['index']    
+                    break
+            for i in x.index:
+                if (str(x.loc[i]['evaluate_ori']) == 'fn') or get_empty_bool(x.loc[i]['index'], x):
+                    continue
+                if (value == x.loc[i]['state_name']):
+                    if (x.loc[i]['state_name']) or ((not x.loc[i]['state_name']) and get_same_bool(x.loc[i]['index'], first_value, x)):
+                        x.loc[i, 'state_order'] = 1
+    
+    if len(dict) > 0:
+        dict_max = max(dict)
+    else:
+        return x    
+    
+    #有无无法判断的界面顺序
     for i in x.index:
-        if ((str(x.loc[i]['type']) == 'EMPTY_EVENT') or (str(x.loc[i]['type']) == 'SYS_EVENT')) :
+        if (str(x.loc[i]['tgt_index']) != 'nan') or (get_empty_bool(x.loc[i]['index'], x)):
             continue
+        if str(x.loc[i]['evaluate_ori']) == 'fn':
+            continue
+    
         if (x.loc[i]['state_name']) and (x.loc[i]['state_order'] == sys.maxsize):
             cnt_no_state_order = cnt_no_state_order + 1
 
   
     if cnt_no_state_order > 0:
         x = assign_state_order_improved(x)
- 
-    x.sort_values(by=['state_order', 'state_name', 'by', 'bx', 'tgt_index', 'src_app', 'index'], inplace=True, ascending=True) 
 
-      
-    for i in range(len(x)-1, -1, -1):
-        #sys,empty,找不到sta, 填完的跳过
-        if ((str(x.iloc[i]['type']) == 'EMPTY_EVENT') or (str(x.iloc[i]['type']) == 'SYS_EVENT')) :
-            continue
-        if (not x.iloc[i]['state_name']):
-            continue
-        if str(x.iloc[i]['tgt_index']) != 'nan':
-            continue
-        if x.iloc[i]['state_order'] == sys.maxsize:
-            continue
+    # x = set_order(x) #指定界面分类
+    x.sort_values(by=['state_order', 'state_name', 'by', 'bx', 'src_app', 'src_index', 'index'], inplace=True, ascending=True) 
+        
+    x, dict = single_state_fill(x, dict, dict_max, 1)
     
-        
-        #判断是否已有该组件
-        flag = 0
-        for key, value in dict.items():
-            if get_same_bool(x.iloc[i]['index'], value, x):
-                x.iloc[i, 20] = key
-                flag = 1
-        if (flag == 1):
-            continue
-        
-        #寻找左右区间，第一个有值且在同一界面内的
-        l = i  
-        r = i
-        while ((str(x.iloc[l]['tgt_index']) == 'nan')):
-            if (l - 1 < 0):
-                break
-            l = l - 1
-        while ((str(x.iloc[r]['tgt_index']) == 'nan')):
-            if (r + 1 == len(x)):
-                break
-            r = r + 1
-        if (str(x.iloc[l]['tgt_index']) == 'nan'):
-            #只有右侧
-            if (str(x.iloc[r]['tgt_index']) != 'nan'):
-                index = x.iloc[r]['tgt_index'] - 1
-                while ((index in dict.keys()) or ((index > -3) and (index < 0))):
-                    #如果是同一组件
-                    if index in dict.keys():
-                        if get_same_bool(x.iloc[i]['index'], dict[index], x):
-                            break
-                    index = index - 1
-                x.iloc[i, 20] = index
-                dict[index] = x.iloc[i]['index']    
-        else:
-            if get_screen_bool(i, l, x) or not get_screen_bool(i, l, x):
-                #左右都有
-                if ((str(x.iloc[r]['tgt_index']) != 'nan')):
-                    #左右相等 看一下=5的例子
-                    if get_same_bool(x.iloc[l]['index'], x.iloc[r]['index'], x):
-                        index = x.iloc[r]['tgt_index'] - 0.1
-                        while ((index in dict.keys()) or ((index > -3) and (index < 0))):
-                            index = index - 0.1
-                    else:            
-                        index = (x.iloc[l]['tgt_index'] + x.iloc[r]['tgt_index']) / 2   
-                        while (index in dict.keys()):
-                            index = (x.iloc[l]['tgt_index'] + index) / 2
-                    x.iloc[i, 20] = index
-                    dict[index] = x.iloc[i]['index']    
-                #只有左侧
-                else:
-                    index = x.iloc[l]['tgt_index'] + 1
-                    while ((index in dict.keys()) or ((index > dict_max) and (index < 20))):
-                        if index in dict.keys():
-                            if get_same_bool(x.iloc[i]['index'], dict[index], x):
-                                break
-                        index = index + 1
-                    x.iloc[i, 20] = index
-                    dict[index] = x.iloc[i]['index']
-                            
-           
-            #else什么都没有
-        pmin = min(pmin, x.iloc[i]['tgt_index'])
-        pmax = max(pmax, x.iloc[i]['tgt_index'])
-
-    for i in range(0, len(x)):
-        if str(x.iloc[i]['tgt_index']) != 'nan':
-            continue
-        if ((str(x.iloc[i]['type']) == 'EMPTY_EVENT') or (str(x.iloc[i]['type']) == 'SYS_EVENT')) :
-            continue
-        if (not x.iloc[i]['state_name'] or x.iloc[i]['state_order'] == sys.maxsize):
-            flag = 0
-            if not x.iloc[i]['state_name']:
-                y = x[x['src_app'] == x.iloc[i]['src_app']]
-                for j in y.index:
-                    if (y.loc[j]['tgt_index'] == 0) and (x.iloc[i]['src_index'] < y.loc[j]['src_index']):
-                            x.iloc[i, 20] = -3
-                            flag = 1
-                            break
-            if flag == 0:
-                for key, value in dict.items():
-                    if get_same_bool(x.iloc[i]['index'], value, x):
-                        x.iloc[i, 20] = key
-                        flag = 1
-                        break
-            
-            if flag == 0:
-                index =  max(max(dict) + 1, 20)
-                x.iloc[i, 20] = index
-                dict[index] = x.iloc[i]['index']      
+    x.sort_values(by=['index'], inplace=True, ascending=True) 
+    x, dict = no_state_or_order_fill(x, dict)
     
     return x
+
+
 def muti_state(x):
-    sta_dict = {}
-    bounds_dict = {}
-    
+    m = 0
     #定位所需列
     state_name_column = x.columns.get_loc("state_name")
     bounds_column = x.columns.get_loc("bounds")
@@ -509,13 +621,13 @@ def muti_state(x):
     by_column = x.columns.get_loc("by")
     pos_column = x.columns.get_loc("pos")
 
-    m = 0
     for i in range(0, len(x)):
         flag = 1
         if x.iloc[i]['cnt'] > 1:
             flag = 2
             sta_dict = ast.literal_eval(x.iloc[i]['state_name'])
             bounds_dict = ast.literal_eval(x.iloc[i]['bounds'])
+        
             l = i
             flagl = 0
             while l > 0:
@@ -538,7 +650,6 @@ def muti_state(x):
                     flagr = 1
                     break
             
-            
             if flagl:
                 x.iloc[i, state_name_column] = x.iloc[l]['state_name']
                 if (flagr) and (r-i < i-l):
@@ -546,13 +657,11 @@ def muti_state(x):
                 x.iloc[i, bounds_column] = bounds_dict[sta_dict.index(x.iloc[i]['state_name'])]
                 flag = 1
                 m = m +1
-
             elif flagr:
                 x.iloc[i, state_name_column] = x.iloc[r]['state_name']
                 x.iloc[i, bounds_column] = bounds_dict[sta_dict.index(x.iloc[i]['state_name'])]
                 flag = 1
                 m = m +1
-
         if flag == 1:
             pattern = re.compile(r'\[(.*?)\]')
             locs = pattern.findall(x.iloc[i]['bounds'])
@@ -576,27 +685,25 @@ def muti_state(x):
                         x.loc[i, 'bx'] = x.loc[j]['bx']
                         x.loc[i, 'by'] = x.loc[j]['by']
                         x.loc[i, 'pos'] = x.loc[j]['pos']
-
     return m
+ 
 def solve(x):
     #标记相对位置
-    tgt_app = ''
-    function = ''
     global num
     num = num + 1
     for i in x.index:
-        x.loc[i, 'state_name'], x.loc[i, 'bounds'], x.loc[i, 'cnt'] = get_location(x.loc[i]['tgt_app'], str(x.loc[i]['tgt_add_id']), str(x.loc[i]['tgt_add_xpath']))
+        x.loc[i, 'state_name'], x.loc[i, 'bounds'], x.loc[i, 'cnt'] = get_location(x.loc[i]['index'], x.loc[i]['tgt_app'], str(x.loc[i]['tgt_add_id']), str(x.loc[i]['tgt_add_xpath']))
         x.loc[i, 'bx'] = sys.maxsize
         x.loc[i, 'by'] = sys.maxsize
         x.loc[i, 'pos'] = str(sys.maxsize) + ' ' + str(sys.maxsize)
-        x.loc[i, 'list'] = x.loc[i, 'state_name']
-        x.loc[i, 'same'] = 0
+        x.loc[i, 'list'] = x.loc[i, 'state_name']   
     x.sort_values(by=['src_app', 'index'], inplace=True, ascending=True) 
-    
+
     #处理多statename情况
     while True:        
         if muti_state(x) == 0:
             break
+
 
     #获取最长子序列并记录在字段lcs中
     result_group_src= x.groupby(['src_app'], group_keys=True).apply(lcs)
@@ -605,59 +712,38 @@ def solve(x):
     
     lcs_dict = {}
     order_dict = {}
-    if (lcs_max > 0):
-        lcs_dict = ast.literal_eval(result_group_src.iloc[lcs_idx]['lcs'])
-        order_dict = ast.literal_eval(result_group_src.iloc[lcs_idx]['order'])
-    else:
-        df_lcs = pd.read_csv('correct_lcs.csv')
-        result_group_src = df_lcs.groupby(['tgt_app', 'function'], group_keys=True).get_group((x.iloc[0]['tgt_app'], x.iloc[0]['function']))
-        step = 0
-        for i in result_group_src.index:
-            if str(result_group_src.loc[i]['tgt_index']) != 'nan':
-                lcs_dict[result_group_src.loc[i]['tgt_index']] = result_group_src.loc[i]['index']
-        
-        lcs_dict = dict(sorted(lcs_dict.items()))
-        for key, value in lcs_dict.items():
-            state_name_value = result_group_src[result_group_src['index'] == value]['state_name'].iloc[0]
-            if (state_name_value not in order_dict.values()):
-                order_dict[step] = state_name_value
-                step += 1
-
-    
-
-  
-    #按照最长子序列填充tgt_index + 记录界面相对位置
     for i in x.index:
         x.loc[i, 'state_order'] = sys.maxsize
-        #sys_event直接填
-        if str(x.loc[i]['type']) == 'SYS_EVENT':
-            x.loc[i, 'tgt_index'] = x.loc[i]['correct_tgt_index']
-            lcs_dict[x.loc[i]['correct_tgt_index']] = x.loc[i]['index']
-            continue
-        for key, value in lcs_dict.items():
-            if get_same_bool(x.loc[i]['index'], value, x):
-                x.loc[i, 'tgt_index'] = key
-                break
-        position = 0
-        for key, value in order_dict.items():
-            if (value == x.loc[i]['state_name']):
-                first_value = list(lcs_dict.values())[position]
-                if ((not x.loc[i]['state_name']) and (get_same_bool(x.loc[i]['index'], first_value, x))) or (x.loc[i]['state_name']):
-                    x.loc[i, 'state_order'] = key
-            position += 1
     
-     
+    if (lcs_max > 0):      
+        lcs_dict = ast.literal_eval(result_group_src.iloc[lcs_idx]['lcs'])
+        order_dict = ast.literal_eval(result_group_src.iloc[lcs_idx]['order'])
+        #按照最长子序列填充tgt_index + 记录界面相对位置
+        for i in x.index:
+            if (str(x.loc[i]['evaluate_ori']) == 'fn') or get_empty_bool(x.loc[i]['index'], x):
+                continue
+            for key, value in lcs_dict.items():
+                if get_same_bool(x.loc[i]['index'], value, x):
+                    x.loc[i, 'tgt_index'] = key
+                    break
+            position = 0
+            for key, value in order_dict.items():
+                if (value == x.loc[i]['state_name']):
+                    first_value = list(lcs_dict.values())[position]
+                    if ((not x.loc[i]['state_name']) and (get_same_bool(x.loc[i]['index'], first_value, x))) or (x.loc[i]['state_name']):
+                        x.loc[i, 'state_order'] = key
+                position += 1
+    
     #2.按照相对位置填充tgt_index
-    x = fill_pos(x, lcs_dict, max(lcs_dict))     
+    x = fill_pos(x, lcs_dict)
+
+    #检查
     return x
-
-
 
 def main():
     df = pd.read_csv('data.csv')
     #组内找相对位置+最长子序列
     result_group = df.groupby(['tgt_app', 'function'], group_keys=True).apply(solve)
-    
     #反向填充原始文件
     for i in range(0, len(result_group)):
         index = result_group.iloc[i]['index']
@@ -666,9 +752,10 @@ def main():
         df.loc[df['index']==index, 'state_order'] = result_group.iloc[i]['state_order']
         df.loc[df['index']==index, 'pos'] = result_group.iloc[i]['pos']
         df.loc[df['index']==index, 'list'] = result_group.iloc[i]['list']
-
-    selected_columns_df = df[['index', 'src_app', 'tgt_app', 'function', 'tgt_add_id', 'tgt_add_xpath', 'ori_tgt_index', 'ori_predict_label', 'label', 'src_index','correct_tgt_index', 'tgt_index', 'state_name', 'state_order', 'pos']]
-    selected_columns_df.to_csv("result_craftdroid.csv", index=False)
+    
+    selected_columns_df = df[['index', 'src_app', 'tgt_app', 'function', 'canonical', 'tgt_add_id', 'tgt_add_xpath', 'ori_tgt_index', 'ori_predict_label', 'label', 'src_index','correct_tgt_index', 'tgt_index', 'state_name', 'state_order', 'pos']]
+    selected_columns_df.to_csv("result_appflow.csv", index=False)
+    
     
 
 if __name__ == "__main__":
